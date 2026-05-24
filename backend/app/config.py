@@ -11,6 +11,22 @@ class Settings(BaseSettings):
         url = self.DATABASE_URL
         if url.startswith("postgres://"):
             url = url.replace("postgres://", "postgresql://", 1)
+            
+        from urllib.parse import quote, unquote
+        scheme_end = url.find('://')
+        if scheme_end != -1:
+            scheme = url[:scheme_end+3]
+            rest = url[scheme_end+3:]
+            pieces = rest.rsplit('@', 1)
+            if len(pieces) == 2:
+                user_pass, host_rest = pieces
+                user_pass_parts = user_pass.split(':', 1)
+                if len(user_pass_parts) == 2:
+                    user, raw_pass = user_pass_parts
+                    raw_pass = unquote(raw_pass)
+                    encoded_pass = quote(raw_pass, safe="")
+                    url = f"{scheme}{user}:{encoded_pass}@{host_rest}"
+                
         return url
 
     # JWT

@@ -17,7 +17,9 @@ from app.config import settings
 config = context.config
 
 # Override the database URL from environment / .env so DATABASE_URL is always respected
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# We must escape % to %% because Alembic uses ConfigParser which interprets % as interpolation
+db_url_escaped = settings.get_database_url.replace("%", "%%")
+config.set_main_option("sqlalchemy.url", db_url_escaped)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

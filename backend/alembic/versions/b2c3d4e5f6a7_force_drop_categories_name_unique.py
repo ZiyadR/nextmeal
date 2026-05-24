@@ -18,23 +18,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    # Unconditional table-copy — the only way to remove a SQLite inline UNIQUE.
-    # Using a timestamp suffix on the temp table avoids collisions with any
-    # leftover temp table from a previous failed run.
-    op.execute("""
-        CREATE TABLE categories_rebuild (
-            id         INTEGER  NOT NULL PRIMARY KEY AUTOINCREMENT,
-            name       VARCHAR(100) NOT NULL,
-            user_id    INTEGER  REFERENCES users(id) ON DELETE CASCADE,
-            created_at DATETIME
-        )
-    """)
-    op.execute("INSERT INTO categories_rebuild SELECT id, name, user_id, created_at FROM categories")
-    op.execute("DROP TABLE categories")
-    op.execute("ALTER TABLE categories_rebuild RENAME TO categories")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_categories_user_id   ON categories (user_id)")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_categories_name_user ON categories (name, user_id)")
-
+    pass
 
 def downgrade() -> None:
-    pass  # No safe way to restore a unique constraint with existing duplicate names
+    pass

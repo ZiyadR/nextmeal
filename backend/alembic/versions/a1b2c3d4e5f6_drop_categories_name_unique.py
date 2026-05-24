@@ -18,49 +18,49 @@ branch_labels = None
 depends_on = None
 
 
-def _has_unique_on_name() -> bool:
-    """Return True if categories.name still carries a unique constraint."""
+def _get_unique_constraint_name() -> str | None:
+    """Return the name of the unique constraint on categories.name, if it exists."""
     bind = op.get_bind()
-    for idx in Inspector.from_engine(bind).get_indexes('categories'):
+    from sqlalchemy.engine import Inspector
+    inspector = Inspector.from_engine(bind)
+    
+    # Try to find it as a unique constraint
+    for uc in inspector.get_unique_constraints('categories'):
+        if uc.get('column_names') == ['name']:
+            return uc.get('name')
+            
+    # Try to find it as a unique index (sometimes constraints show up as indexes)
+    for idx in inspector.get_indexes('categories'):
         if idx.get('unique') and idx.get('column_names') == ['name']:
-            return True
-    return False
+            return idx.get('name')
+            
+    return None
 
 
 def upgrade() -> None:
-    if not _has_unique_on_name():
-        # Already fixed — nothing to do
-        return
-
-    # SQLite table-copy to drop the inline UNIQUE on name.
-    op.execute("""
-        CREATE TABLE IF NOT EXISTS categories_new (
-            id       INTEGER  NOT NULL PRIMARY KEY AUTOINCREMENT,
-            name     VARCHAR(100) NOT NULL,
-            user_id  INTEGER  REFERENCES users(id) ON DELETE CASCADE,
-            created_at DATETIME
-        )
-    """)
-    op.execute("INSERT INTO categories_new SELECT id, name, user_id, created_at FROM categories")
-    op.execute("DROP TABLE categories")
-    op.execute("ALTER TABLE categories_new RENAME TO categories")
-
-    # Restore indexes (without the old unique-on-name one)
-    op.execute("CREATE INDEX IF NOT EXISTS ix_categories_user_id    ON categories (user_id)")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_categories_name_user  ON categories (name, user_id)")
+    constraint_name = _get_unique_constraint_name()
+    if constraint_name:
+        op.drop_constraint(constraint_name, 'categories', type_='unique')
+    
+    # Create indexes using the standard approach
+    # In Postgres, creating an index that already exists will fail unless we use IF NOT EXISTS,
+    # but Alembic's op.create_index doesn't natively support IF NOT EXISTS easily.
+    # However, since this is a forward migration, they shouldn't exist yet.
+    bind = op.get_bind()
+    from sqlalchemy.engine import Inspector
+    inspector = Inspector.from_engine(bind)
+    existing_indexes = [idx['name'] for idx in inspector.get_indexes('categories')]
+    
+    if 'ix_categories_user_id' not in existing_indexes:
+        op.create_index('ix_categories_user_id', 'categories', ['user_id'])
+    if 'ix_categories_name_user' not in existing_indexes:
+        op.create_index('ix_categories_name_user', 'categories', ['name', 'user_id'])
 
 
 def downgrade() -> None:
-    # Recreate with the unique constraint
-    op.execute("""
-        CREATE TABLE IF NOT EXISTS categories_old (
-            id       INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-            name     VARCHAR(100) NOT NULL UNIQUE,
-            user_id  INTEGER REFERENCES users(id) ON DELETE CASCADE,
-            created_at DATETIME
-        )
-    """)
-    op.execute("INSERT INTO categories_old SELECT id, name, user_id, created_at FROM categories")
-    op.execute("DROP TABLE categories")
-    op.execute("ALTER TABLE categories_old RENAME TO categories")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_categories_user_id ON categories (user_id)")
+    try:
+        op.drop_index('ix_categories_name_user', table_name='categories')
+        op.drop_index('ix_categories_user_id', table_name='categories')
+        op.create_unique_constraint('categories_name_key', 'categories', ['name'])
+    except Exception as e:
+        print(f"Notice: Could not restore constraint: {e}")

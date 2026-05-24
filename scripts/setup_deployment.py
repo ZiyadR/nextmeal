@@ -19,15 +19,39 @@ def main():
     print("\nPlease paste your Supabase Connection String (URI).")
     print("It should look like: postgres://postgres.[ref]:[password]@.../postgres\n")
     
+    import re
     db_url = input("DATABASE_URL: ").strip()
     
     if not db_url:
         print("Error: DATABASE_URL cannot be empty.")
         sys.exit(1)
         
+    # Extract just the URL in case the user accidentally pasted extra text
+    match = re.search(r'(postgres(?:ql)?://[^\s]+)', db_url)
+    if match:
+        db_url = match.group(1)
+    else:
+        print("Error: Could not find a postgres:// or postgresql:// URL in your input.")
+        sys.exit(1)
+        
     if db_url.startswith("postgres://"):
         db_url = db_url.replace("postgres://", "postgresql://", 1)
         
+    from urllib.parse import quote, unquote
+    scheme_end = db_url.find('://')
+    if scheme_end != -1:
+        scheme = db_url[:scheme_end+3]
+        rest = db_url[scheme_end+3:]
+        pieces = rest.rsplit('@', 1)
+        if len(pieces) == 2:
+            user_pass, host_rest = pieces
+            user_pass_parts = user_pass.split(':', 1)
+            if len(user_pass_parts) == 2:
+                user, raw_pass = user_pass_parts
+                raw_pass = unquote(raw_pass)
+                encoded_pass = quote(raw_pass, safe="")
+                db_url = f"{scheme}{user}:{encoded_pass}@{host_rest}"
+
     if not db_url.startswith("postgresql://"):
         print("Error: It doesn't look like a valid PostgreSQL URL.")
         sys.exit(1)

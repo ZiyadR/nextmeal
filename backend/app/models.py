@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Boolean, Column, Integer, String, Date, DateTime, ForeignKey, Table, CheckConstraint, Index
+from sqlalchemy import Boolean, Column, Integer, String, Date, DateTime, ForeignKey, Table, CheckConstraint, Index, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 
@@ -36,8 +36,7 @@ class User(Base):
 class Category(Base):
     __tablename__ = 'categories'
     __table_args__ = (
-        # One category name per user (NULL user_id = global seed pool, duplicates allowed there)
-        # SQLite treats each NULL as distinct so this won't block multiple seed rows with the same name.
+        UniqueConstraint('name', 'user_id', name='uq_category_name_user'),
         Index('ix_categories_name_user', 'name', 'user_id'),
     )
 
