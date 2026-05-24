@@ -65,7 +65,7 @@ def upgrade() -> None:
         sa.Column('date', sa.Date(), nullable=False),
         sa.Column('recipe_id', sa.Integer(), nullable=True),
         sa.Column('meal_type', sa.String(length=20), nullable=True, server_default='dinner'),
-        sa.Column('cooked', sa.Boolean(), nullable=False, server_default='1'),
+        sa.Column('cooked', sa.Boolean(), nullable=False, server_default=sa.text('true')),
         sa.Column('created_at', sa.DateTime(), nullable=True),
         sa.ForeignKeyConstraint(['recipe_id'], ['recipes.id'], ondelete='SET NULL'),
         sa.PrimaryKeyConstraint('id')

@@ -1,16 +1,23 @@
 from logging.config import fileConfig
+import os
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
 from alembic import context
 
-# Import the models Base to enable autogeneration
-from app.models import Base
+# Import all models so autogenerate can detect them
+from app.models import Base, User, Recipe, Category, MealHistory, Skip  # noqa: F401
+
+# Override sqlalchemy.url from environment variable if set
+from app.config import settings
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+# Override the database URL from environment / .env so DATABASE_URL is always respected
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.

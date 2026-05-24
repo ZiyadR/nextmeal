@@ -5,15 +5,112 @@ from typing import List, Optional
 from app import models, schemas
 
 
+# --------------------------------------------------------------------------
+# Category seeding
+# --------------------------------------------------------------------------
+
+# Default category names used to seed new user accounts.
+# These match the categories that were initially loaded via seed_data.py.
+def seed_categories_for_user(db: Session, user_id: int) -> None:
+    """
+    Copy the global seed categories (user_id IS NULL) into a new user's space.
+    Skips any category name the user already owns (idempotent).
+    """
+    # Names the user already has
+    existing = {
+        row[0]
+        for row in db.query(models.Category.name)
+        .filter(models.Category.user_id == user_id)
+        .all()
+    }
+
+    # Global seed pool (created by seed_data.py with user_id=NULL)
+    seed_names = [
+        row[0]
+        for row in db.query(models.Category.name)
+        .filter(models.Category.user_id.is_(None))
+        .distinct()
+        .all()
+    ]
+
+    for name in seed_names:
+        if name not in existing:
+            db.add(models.Category(name=name, user_id=user_id))
+
+    db.commit()
+
+
+
+def seed_recipes_for_user(db: Session, user_id: int) -> None:
+    """
+    Copy the global seed recipes (user_id IS NULL) into a new user's recipe list.
+    Each recipe's categories are remapped to the user's own categories by name.
+    Idempotent — skips any recipe name the user already owns.
+    """
+    # Names the user already has
+    existing_names = {
+        row[0]
+        for row in db.query(models.Recipe.name)
+        .filter(models.Recipe.user_id == user_id)
+        .all()
+    }
+
+    # Build a lookup of the user's categories by name
+    user_cats = {
+        cat.name: cat
+        for cat in db.query(models.Category)
+        .filter(models.Category.user_id == user_id)
+        .all()
+    }
+
+    # Fetch all global seed recipes with their categories eagerly
+    seed_recipes = (
+        db.query(models.Recipe)
+        .filter(models.Recipe.user_id.is_(None))
+        .all()
+    )
+
+    for seed in seed_recipes:
+        if seed.name in existing_names:
+            continue
+
+        new_recipe = models.Recipe(
+            user_id=user_id,
+            name=seed.name,
+            like_score=seed.like_score,
+            effort_score=seed.effort_score,
+            prep_time_minutes=seed.prep_time_minutes,
+            cook_time_minutes=seed.cook_time_minutes,
+            cleanup_effort=seed.cleanup_effort,
+            skip_count=0,
+        )
+
+        # Map global categories → user's categories by name
+        new_recipe.categories = [
+            user_cats[cat.name]
+            for cat in seed.categories
+            if cat.name in user_cats
+        ]
+
+        db.add(new_recipe)
+
+    db.commit()
+
+
+# --------------------------------------------------------------------------
 # Recipe operations
+
+# --------------------------------------------------------------------------
+
 def get_recipes(
     db: Session,
+    user_id: int,
     skip: int = 0,
     limit: int = 100,
-    category_id: Optional[int] = None
+    category_id: Optional[int] = None,
 ) -> List[models.Recipe]:
-    """Get all recipes with optional filtering and pagination."""
-    query = db.query(models.Recipe)
+    """Get all recipes for a user with optional filtering and pagination."""
+    query = db.query(models.Recipe).filter(models.Recipe.user_id == user_id)
 
     if category_id:
         query = query.join(models.Recipe.categories).filter(models.Category.id == category_id)
@@ -21,14 +118,19 @@ def get_recipes(
     return query.offset(skip).limit(limit).all()
 
 
-def get_recipe(db: Session, recipe_id: int) -> Optional[models.Recipe]:
-    """Get a specific recipe by ID."""
-    return db.query(models.Recipe).filter(models.Recipe.id == recipe_id).first()
+def get_recipe(db: Session, recipe_id: int, user_id: int) -> Optional[models.Recipe]:
+    """Get a specific recipe by ID, scoped to the requesting user."""
+    return (
+        db.query(models.Recipe)
+        .filter(models.Recipe.id == recipe_id, models.Recipe.user_id == user_id)
+        .first()
+    )
 
 
-def create_recipe(db: Session, recipe: schemas.RecipeCreate) -> models.Recipe:
-    """Create a new recipe."""
+def create_recipe(db: Session, recipe: schemas.RecipeCreate, user_id: int) -> models.Recipe:
+    """Create a new recipe owned by user_id."""
     db_recipe = models.Recipe(
+        user_id=user_id,
         name=recipe.name,
         like_score=recipe.like_score,
         effort_score=recipe.effort_score,
@@ -37,11 +139,12 @@ def create_recipe(db: Session, recipe: schemas.RecipeCreate) -> models.Recipe:
         cleanup_effort=recipe.cleanup_effort,
     )
 
-    # Add categories
     if recipe.category_ids:
-        categories = db.query(models.Category).filter(
-            models.Category.id.in_(recipe.category_ids)
-        ).all()
+        categories = (
+            db.query(models.Category)
+            .filter(models.Category.id.in_(recipe.category_ids), models.Category.user_id == user_id)
+            .all()
+        )
         db_recipe.categories = categories
 
     db.add(db_recipe)
@@ -53,11 +156,12 @@ def create_recipe(db: Session, recipe: schemas.RecipeCreate) -> models.Recipe:
 def update_recipe_dates(
     db: Session,
     recipe_id: int,
+    user_id: int,
     last_cooked_date: Optional[date] = None,
-    last_suggested_date: Optional[date] = None
+    last_suggested_date: Optional[date] = None,
 ) -> None:
     """Update recipe's last cooked or suggested dates."""
-    recipe = get_recipe(db, recipe_id)
+    recipe = get_recipe(db, recipe_id, user_id)
     if recipe:
         if last_cooked_date:
             recipe.last_cooked_date = last_cooked_date
@@ -67,55 +171,87 @@ def update_recipe_dates(
         db.commit()
 
 
-def increment_skip_count(db: Session, recipe_id: int) -> None:
+def increment_skip_count(db: Session, recipe_id: int, user_id: int) -> None:
     """Increment the skip count for a recipe."""
-    recipe = get_recipe(db, recipe_id)
+    recipe = get_recipe(db, recipe_id, user_id)
     if recipe:
         recipe.skip_count += 1
         recipe.updated_at = datetime.utcnow()
         db.commit()
 
 
-def update_like_score(db: Session, recipe_id: int, new_score: int) -> None:
+def update_like_score(db: Session, recipe_id: int, user_id: int, new_score: int) -> None:
     """Update a recipe's like score."""
-    recipe = get_recipe(db, recipe_id)
+    recipe = get_recipe(db, recipe_id, user_id)
     if recipe and 1 <= new_score <= 5:
         recipe.like_score = new_score
         recipe.updated_at = datetime.utcnow()
         db.commit()
 
 
-# Category operations
-def get_categories(db: Session) -> List[models.Category]:
-    """Get all categories."""
-    return db.query(models.Category).all()
+# --------------------------------------------------------------------------
+# Category operations (per-user)
+# --------------------------------------------------------------------------
+
+def get_categories(db: Session, user_id: int) -> List[models.Category]:
+    """Get all categories for a user."""
+    return db.query(models.Category).filter(models.Category.user_id == user_id).all()
 
 
-def get_category(db: Session, category_id: int) -> Optional[models.Category]:
-    """Get a specific category by ID."""
-    return db.query(models.Category).filter(models.Category.id == category_id).first()
+def get_category(db: Session, category_id: int, user_id: int) -> Optional[models.Category]:
+    """Get a specific category by ID, scoped to the user."""
+    return (
+        db.query(models.Category)
+        .filter(models.Category.id == category_id, models.Category.user_id == user_id)
+        .first()
+    )
 
 
-def get_or_create_category(db: Session, name: str) -> models.Category:
-    """Get existing category by name or create new one."""
-    category = db.query(models.Category).filter(models.Category.name == name).first()
+def get_or_create_category(db: Session, name: str, user_id: int) -> models.Category:
+    """Get existing category by name for the user, or create a new one."""
+    category = (
+        db.query(models.Category)
+        .filter(func.lower(models.Category.name) == name.lower(), models.Category.user_id == user_id)
+        .first()
+    )
     if not category:
-        category = models.Category(name=name)
+        category = models.Category(name=name, user_id=user_id)
         db.add(category)
         db.commit()
         db.refresh(category)
     return category
 
 
+def delete_category(db: Session, category_id: int, user_id: int) -> bool:
+    """
+    Delete a category owned by the user. Removes associations from recipes.
+    Returns True if deleted, False if not found.
+    """
+    category = get_category(db, category_id, user_id)
+    if not category:
+        return False
+    db.delete(category)
+    db.commit()
+    return True
+
+
+# --------------------------------------------------------------------------
 # MealHistory operations
+# --------------------------------------------------------------------------
+
 def get_meal_history(
     db: Session,
+    user_id: int,
     limit: int = 50,
     start_date: Optional[date] = None,
-    end_date: Optional[date] = None
+    end_date: Optional[date] = None,
 ) -> List[models.MealHistory]:
-    """Get meal history with optional date filtering."""
-    query = db.query(models.MealHistory).order_by(desc(models.MealHistory.date))
+    """Get meal history for a user with optional date filtering."""
+    query = (
+        db.query(models.MealHistory)
+        .filter(models.MealHistory.user_id == user_id)
+        .order_by(desc(models.MealHistory.date))
+    )
 
     if start_date:
         query = query.filter(models.MealHistory.date >= start_date)
@@ -125,45 +261,54 @@ def get_meal_history(
     return query.limit(limit).all()
 
 
-def get_last_cooked_meal(db: Session) -> Optional[models.MealHistory]:
-    """Get the most recent cooked meal."""
-    return db.query(models.MealHistory)\
-        .filter(models.MealHistory.cooked == True)\
-        .order_by(desc(models.MealHistory.date))\
+def get_last_cooked_meal(db: Session, user_id: int) -> Optional[models.MealHistory]:
+    """Get the most recent cooked meal for a user."""
+    return (
+        db.query(models.MealHistory)
+        .filter(models.MealHistory.user_id == user_id, models.MealHistory.cooked == True)
+        .order_by(desc(models.MealHistory.date))
         .first()
+    )
 
 
-def get_recent_meals(db: Session, limit: int = 3) -> List[models.MealHistory]:
-    """Get the most recent meals."""
-    return db.query(models.MealHistory)\
-        .filter(models.MealHistory.cooked == True)\
-        .order_by(desc(models.MealHistory.date))\
-        .limit(limit)\
+def get_recent_meals(db: Session, user_id: int, limit: int = 3) -> List[models.MealHistory]:
+    """Get the most recent cooked meals for a user."""
+    return (
+        db.query(models.MealHistory)
+        .filter(models.MealHistory.user_id == user_id, models.MealHistory.cooked == True)
+        .order_by(desc(models.MealHistory.date))
+        .limit(limit)
         .all()
+    )
 
 
-def get_planned_meals(db: Session, days: int = 7) -> List[models.MealHistory]:
-    """Get planned (not yet cooked) meals for the next N days."""
+def get_planned_meals(db: Session, user_id: int, days: int = 7) -> List[models.MealHistory]:
+    """Get planned (not yet cooked) meals for the next N days for a user."""
     today = date.today()
-    # Allow 1 day of tolerance for client vs server timezone differences
     start_date = today - timedelta(days=1)
     end_date = today + timedelta(days=days - 1)
-    return db.query(models.MealHistory)\
+    return (
+        db.query(models.MealHistory)
         .filter(
+            models.MealHistory.user_id == user_id,
             models.MealHistory.date >= start_date,
             models.MealHistory.date <= end_date,
-            models.MealHistory.cooked == False
-        )\
-        .order_by(models.MealHistory.date)\
+            models.MealHistory.cooked == False,
+        )
+        .order_by(models.MealHistory.date)
         .all()
+    )
 
 
-def delete_meal_history(db: Session, meal_id: int) -> bool:
-    """Delete a planned meal. Only allows deleting future/today entries with cooked=False."""
-    meal = db.query(models.MealHistory).filter(models.MealHistory.id == meal_id).first()
+def delete_meal_history(db: Session, meal_id: int, user_id: int) -> bool:
+    """Delete a planned meal owned by the user. Only allows future/today uncooked entries."""
+    meal = (
+        db.query(models.MealHistory)
+        .filter(models.MealHistory.id == meal_id, models.MealHistory.user_id == user_id)
+        .first()
+    )
     if not meal:
         return False
-    # Allow 1 day timezone offset tolerance
     if meal.date < (date.today() - timedelta(days=1)):
         return False
     if meal.cooked:
@@ -175,160 +320,187 @@ def delete_meal_history(db: Session, meal_id: int) -> bool:
 
 def create_meal_history(
     db: Session,
+    user_id: int,
     recipe_id: Optional[int],
     meal_date: date,
     meal_type: str = 'dinner',
-    cooked: bool = True
+    cooked: bool = True,
 ) -> models.MealHistory:
-    """Create a new meal history entry."""
+    """Create a new meal history entry for a user."""
     meal = models.MealHistory(
+        user_id=user_id,
         date=meal_date,
         recipe_id=recipe_id,
         meal_type=meal_type,
-        cooked=cooked
+        cooked=cooked,
     )
     db.add(meal)
     db.commit()
     db.refresh(meal)
 
-    # Update recipe's last_cooked_date if cooked
     if cooked and recipe_id:
-        update_recipe_dates(db, recipe_id, last_cooked_date=meal_date)
+        update_recipe_dates(db, recipe_id, user_id, last_cooked_date=meal_date)
 
     return meal
 
 
+# --------------------------------------------------------------------------
 # Skip operations
+# --------------------------------------------------------------------------
+
 def record_skip(
     db: Session,
+    user_id: int,
     recipe_id: int,
     skipped_date: date,
-    reason: Optional[str] = None
+    reason: Optional[str] = None,
 ) -> models.Skip:
-    """Record a recipe skip."""
+    """Record a recipe skip for a user."""
     skip = models.Skip(
+        user_id=user_id,
         recipe_id=recipe_id,
         skipped_date=skipped_date,
-        reason=reason
+        reason=reason,
     )
     db.add(skip)
 
-    # Increment skip count
-    increment_skip_count(db, recipe_id)
+    increment_skip_count(db, recipe_id, user_id)
 
-    # Optionally adjust like_score based on reason
     if reason == 'dont_like':
-        recipe = get_recipe(db, recipe_id)
+        recipe = get_recipe(db, recipe_id, user_id)
         if recipe and recipe.like_score and recipe.like_score > 1:
-            update_like_score(db, recipe_id, recipe.like_score - 1)
+            update_like_score(db, recipe_id, user_id, recipe.like_score - 1)
 
     db.commit()
     db.refresh(skip)
     return skip
 
 
-def get_skips_since(db: Session, days: int = 4) -> List[models.Skip]:
-    """Get all skips within the last N days."""
+def get_skips_since(db: Session, user_id: int, days: int = 4) -> List[models.Skip]:
+    """Get all skips for a user within the last N days."""
     cutoff_date = date.today() - timedelta(days=days)
-    return db.query(models.Skip)\
-        .filter(models.Skip.skipped_date >= cutoff_date)\
+    return (
+        db.query(models.Skip)
+        .filter(models.Skip.user_id == user_id, models.Skip.skipped_date >= cutoff_date)
         .all()
+    )
 
 
-def count_skips_since(db: Session, days: int = 7) -> int:
-    """Count total skips within the last N days."""
+def count_skips_since(db: Session, user_id: int, days: int = 7) -> int:
+    """Count total skips for a user within the last N days."""
     cutoff_date = date.today() - timedelta(days=days)
-    return db.query(models.Skip)\
-        .filter(models.Skip.skipped_date >= cutoff_date)\
+    return (
+        db.query(models.Skip)
+        .filter(models.Skip.user_id == user_id, models.Skip.skipped_date >= cutoff_date)
         .count()
+    )
 
 
+# --------------------------------------------------------------------------
 # Stats operations
-def get_cooking_stats(db: Session) -> dict:
-    """Get cooking statistics."""
-    # Total meals cooked
-    total_meals = db.query(models.MealHistory)\
-        .filter(models.MealHistory.cooked == True)\
-        .count()
+# --------------------------------------------------------------------------
 
-    # Most cooked recipes
-    most_cooked = db.query(
-        models.Recipe.id,
-        models.Recipe.name,
-        func.count(models.MealHistory.id).label('count')
-    ).join(models.MealHistory)\
-        .filter(models.MealHistory.cooked == True)\
-        .group_by(models.Recipe.id)\
-        .order_by(desc('count'))\
-        .limit(5)\
+def get_cooking_stats(db: Session, user_id: int) -> dict:
+    """Get cooking statistics for a user."""
+    total_meals = (
+        db.query(models.MealHistory)
+        .filter(models.MealHistory.user_id == user_id, models.MealHistory.cooked == True)
+        .count()
+    )
+
+    most_cooked = (
+        db.query(
+            models.Recipe.id,
+            models.Recipe.name,
+            func.count(models.MealHistory.id).label('count'),
+        )
+        .join(models.MealHistory)
+        .filter(models.MealHistory.user_id == user_id, models.MealHistory.cooked == True)
+        .group_by(models.Recipe.id)
+        .order_by(desc('count'))
+        .limit(5)
         .all()
+    )
 
     most_cooked_list = [
         {'recipe_id': r.id, 'recipe_name': r.name, 'times_cooked': r.count}
         for r in most_cooked
     ]
 
-    # Category distribution
-    category_dist = db.query(
-        models.Category.name,
-        func.count(models.MealHistory.id).label('count')
-    ).join(models.Recipe.categories)\
-        .join(models.MealHistory)\
-        .filter(models.MealHistory.cooked == True)\
-        .group_by(models.Category.name)\
+    category_dist = (
+        db.query(
+            models.Category.name,
+            func.count(models.MealHistory.id).label('count'),
+        )
+        .join(models.Recipe.categories)
+        .join(models.MealHistory)
+        .filter(models.MealHistory.user_id == user_id, models.MealHistory.cooked == True)
+        .group_by(models.Category.name)
         .all()
+    )
 
     category_dict = {cat.name: cat.count for cat in category_dist}
 
-    # Average effort score
-    avg_effort = db.query(func.avg(models.Recipe.effort_score))\
-        .join(models.MealHistory)\
-        .filter(models.MealHistory.cooked == True)\
-        .scalar() or 0.0
+    avg_effort = (
+        db.query(func.avg(models.Recipe.effort_score))
+        .join(models.MealHistory)
+        .filter(models.MealHistory.user_id == user_id, models.MealHistory.cooked == True)
+        .scalar()
+        or 0.0
+    )
 
     return {
         'total_meals_cooked': total_meals,
         'most_cooked_recipes': most_cooked_list,
         'category_distribution': category_dict,
-        'average_effort_score': round(avg_effort, 2)
+        'average_effort_score': round(avg_effort, 2),
     }
 
 
-def get_recipe_category_names(db: Session, recipe_id: int) -> List[str]:
-    """Get category names for a recipe."""
-    recipe = get_recipe(db, recipe_id)
+# --------------------------------------------------------------------------
+# Miscellaneous helpers
+# --------------------------------------------------------------------------
+
+def get_recipe_category_names(db: Session, recipe_id: int, user_id: int) -> List[str]:
+    """Get category names for a recipe owned by the user."""
+    recipe = get_recipe(db, recipe_id, user_id)
     if recipe:
         return [cat.name for cat in recipe.categories]
     return []
 
 
-def get_days_since_last_cooked(db: Session, recipe_id: int) -> Optional[int]:
-    """Get number of days since recipe was last cooked."""
-    recipe = get_recipe(db, recipe_id)
+def get_days_since_last_cooked(db: Session, recipe_id: int, user_id: int) -> Optional[int]:
+    """Get number of days since a recipe owned by the user was last cooked."""
+    recipe = get_recipe(db, recipe_id, user_id)
     if recipe and recipe.last_cooked_date:
         delta = date.today() - recipe.last_cooked_date
         return delta.days
     return None
 
 
-def update_recipe(db: Session, recipe_id: int, recipe_update: schemas.RecipeUpdate) -> Optional[models.Recipe]:
-    """Update an existing recipe with partial data."""
-    recipe = get_recipe(db, recipe_id)
+def update_recipe(
+    db: Session,
+    recipe_id: int,
+    user_id: int,
+    recipe_update: schemas.RecipeUpdate,
+) -> Optional[models.Recipe]:
+    """Update an existing recipe with partial data, scoped to the user."""
+    recipe = get_recipe(db, recipe_id, user_id)
     if not recipe:
         return None
 
-    # Update fields if provided
     update_data = recipe_update.model_dump(exclude_unset=True)
     category_ids = update_data.pop('category_ids', None)
 
     for field, value in update_data.items():
         setattr(recipe, field, value)
 
-    # Update categories if provided
     if category_ids is not None:
-        categories = db.query(models.Category).filter(
-            models.Category.id.in_(category_ids)
-        ).all()
+        categories = (
+            db.query(models.Category)
+            .filter(models.Category.id.in_(category_ids), models.Category.user_id == user_id)
+            .all()
+        )
         recipe.categories = categories
 
     recipe.updated_at = datetime.utcnow()
@@ -337,64 +509,56 @@ def update_recipe(db: Session, recipe_id: int, recipe_update: schemas.RecipeUpda
     return recipe
 
 
-def delete_recipe(db: Session, recipe_id: int) -> dict:
+def delete_recipe(db: Session, recipe_id: int, user_id: int) -> dict:
     """
-    Delete a recipe and return affected records count.
+    Delete a recipe owned by the user and return affected records count.
 
-    - MealHistory entries with this recipe_id will be SET NULL (preserve history)
-    - Skip entries will CASCADE DELETE (configured in model)
+    - MealHistory entries will be SET NULL (preserves history)
+    - Skip entries will CASCADE DELETE
     """
-    recipe = get_recipe(db, recipe_id)
+    recipe = get_recipe(db, recipe_id, user_id)
     if not recipe:
         return {"success": False, "message": "Recipe not found", "meal_history_affected": 0}
 
-    # Count meal history entries that will be affected
-    meal_history_count = db.query(models.MealHistory).filter(
-        models.MealHistory.recipe_id == recipe_id
-    ).count()
+    meal_history_count = (
+        db.query(models.MealHistory)
+        .filter(models.MealHistory.recipe_id == recipe_id)
+        .count()
+    )
 
     recipe_name = recipe.name
-
-    # Delete the recipe (cascade handles Skip entries, SET NULL handles MealHistory)
     db.delete(recipe)
     db.commit()
 
     return {
         "success": True,
         "message": f"Recipe '{recipe_name}' deleted successfully",
-        "meal_history_affected": meal_history_count
+        "meal_history_affected": meal_history_count,
     }
 
 
-def get_recipe_by_name(db: Session, name: str) -> Optional[models.Recipe]:
-    """Get a recipe by exact name match (case-insensitive)."""
-    return db.query(models.Recipe).filter(
-        func.lower(models.Recipe.name) == name.lower()
-    ).first()
+def get_recipe_by_name(db: Session, name: str, user_id: int) -> Optional[models.Recipe]:
+    """Get a recipe by exact name match (case-insensitive), scoped to the user."""
+    return (
+        db.query(models.Recipe)
+        .filter(func.lower(models.Recipe.name) == name.lower(), models.Recipe.user_id == user_id)
+        .first()
+    )
 
 
 def search_recipes(
     db: Session,
+    user_id: int,
     query: str,
     skip: int = 0,
-    limit: int = 100
+    limit: int = 100,
 ) -> List[models.Recipe]:
-    """Search recipes by name (case-insensitive partial match)."""
+    """Search recipes by name (case-insensitive partial match), scoped to the user."""
     search_pattern = f"%{query}%"
-    return db.query(models.Recipe).filter(
-        models.Recipe.name.ilike(search_pattern)
-    ).offset(skip).limit(limit).all()
-
-
-def delete_category(db: Session, category_id: int) -> bool:
-    """
-    Delete a category. Will remove category associations from recipes.
-    Returns True if deleted, False if not found.
-    """
-    category = get_category(db, category_id)
-    if not category:
-        return False
-
-    db.delete(category)
-    db.commit()
-    return True
+    return (
+        db.query(models.Recipe)
+        .filter(models.Recipe.name.ilike(search_pattern), models.Recipe.user_id == user_id)
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )

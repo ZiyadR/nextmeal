@@ -1,5 +1,5 @@
-from datetime import datetime, date
-from sqlalchemy import Boolean, Column, Integer, String, Date, DateTime, ForeignKey, Table, CheckConstraint
+from datetime import datetime
+from sqlalchemy import Boolean, Column, Integer, String, Date, DateTime, ForeignKey, Table, CheckConstraint, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
 
@@ -14,24 +14,52 @@ recipe_categories = Table(
 )
 
 
-class Category(Base):
-    __tablename__ = 'categories'
+class User(Base):
+    __tablename__ = 'users'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(100), unique=True, nullable=False)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    hashed_password = Column(String(255), nullable=False)
+    refresh_token = Column(String(512), nullable=True)  # stored to allow logout invalidation
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    recipes = relationship('Recipe', back_populates='owner', cascade='all, delete-orphan')
+    meal_histories = relationship('MealHistory', back_populates='owner', cascade='all, delete-orphan')
+    categories = relationship('Category', back_populates='owner', cascade='all, delete-orphan')
+
+    def __repr__(self) -> str:
+        return f"<User(id={self.id}, email='{self.email}')>"
+
+
+class Category(Base):
+    __tablename__ = 'categories'
+    __table_args__ = (
+        # One category name per user (NULL user_id = global seed pool, duplicates allowed there)
+        # SQLite treats each NULL as distinct so this won't block multiple seed rows with the same name.
+        Index('ix_categories_name_user', 'name', 'user_id'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
     recipes = relationship('Recipe', secondary=recipe_categories, back_populates='categories')
+    owner = relationship('User', back_populates='categories')
 
-    def __repr__(self):
-        return f"<Category(id={self.id}, name='{self.name}')>"
+    def __repr__(self) -> str:
+        return f"<Category(id={self.id}, name='{self.name}', user_id={self.user_id})>"
+
 
 
 class Recipe(Base):
     __tablename__ = 'recipes'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=True, index=True)
     name = Column(String(255), nullable=False)
     like_score = Column(Integer, CheckConstraint('like_score BETWEEN 1 AND 5'), nullable=True)
     effort_score = Column(Integer, CheckConstraint('effort_score BETWEEN 1 AND 5'), nullable=False)
@@ -45,11 +73,12 @@ class Recipe(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Relationships
+    owner = relationship('User', back_populates='recipes')
     categories = relationship('Category', secondary=recipe_categories, back_populates='recipes')
     meal_histories = relationship('MealHistory', back_populates='recipe')
     skips = relationship('Skip', back_populates='recipe', cascade='all, delete-orphan')
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Recipe(id={self.id}, name='{self.name}', effort={self.effort_score}, like={self.like_score})>"
 
 
@@ -57,6 +86,7 @@ class MealHistory(Base):
     __tablename__ = 'meal_history'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=True, index=True)
     date = Column(Date, nullable=False)
     recipe_id = Column(Integer, ForeignKey('recipes.id', ondelete='SET NULL'), nullable=True)
     meal_type = Column(String(20), default='dinner')
@@ -64,9 +94,10 @@ class MealHistory(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
+    owner = relationship('User', back_populates='meal_histories')
     recipe = relationship('Recipe', back_populates='meal_histories')
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<MealHistory(id={self.id}, date={self.date}, recipe_id={self.recipe_id}, cooked={self.cooked})>"
 
 
@@ -74,6 +105,7 @@ class Skip(Base):
     __tablename__ = 'skips'
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=True, index=True)
     recipe_id = Column(Integer, ForeignKey('recipes.id', ondelete='CASCADE'), nullable=False)
     skipped_date = Column(Date, nullable=False)
     reason = Column(String(50), nullable=True)  # 'too_much_effort', 'dont_like', or null
@@ -82,5 +114,5 @@ class Skip(Base):
     # Relationships
     recipe = relationship('Recipe', back_populates='skips')
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"<Skip(id={self.id}, recipe_id={self.recipe_id}, date={self.skipped_date}, reason='{self.reason}')>"

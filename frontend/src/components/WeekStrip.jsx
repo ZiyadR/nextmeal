@@ -51,11 +51,21 @@ function WeekStrip({ plannedMeals, activeTargetDate, onDayClick, onRemoveMeal })
               key={key}
               className={`week-day ${isToday ? 'week-day--today' : ''} ${meal ? 'week-day--planned' : 'week-day--empty'} ${isActive ? 'week-day--active' : ''}`}
               onClick={() => onDayClick(key)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  onDayClick(key);
+                }
+              }}
+              tabIndex="0"
+              aria-label={meal ? `Planned for ${dayAbbr(d)} ${dayNum(d)}: ${meal.recipe?.name || 'Manual entry'}. Press enter to view or select.` : `Empty day, ${dayAbbr(d)} ${dayNum(d)}. Press enter to plan a meal.`}
               title={meal ? `${meal.recipe?.name || 'Planned'} — click to remove or select` : `Plan a meal for ${dayAbbr(d)}`}
             >
               <span className="week-day-abbr">{dayAbbr(d)}</span>
-              <span className="week-day-num">{dayNum(d)}</span>
-              {meal ? (
+              <span className="week-day-num-wrapper">
+                <span className="week-day-num">{dayNum(d)}</span>
+              </span>
+              {meal && (
                 <div className="week-day-meal">
                   <span className="week-day-recipe">{meal.recipe?.name || '—'}</span>
                   <button
@@ -65,12 +75,11 @@ function WeekStrip({ plannedMeals, activeTargetDate, onDayClick, onRemoveMeal })
                       onRemoveMeal(meal.id);
                     }}
                     title="Remove"
+                    aria-label={`Remove planned meal for ${dayAbbr(d)}`}
                   >
                     ×
                   </button>
                 </div>
-              ) : (
-                <span className="week-day-add">+</span>
               )}
             </div>
           );

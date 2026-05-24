@@ -6,7 +6,11 @@ import ChooseMealModal from './components/ChooseMealModal';
 import WeekStrip from './components/WeekStrip';
 import ManageRecipes from './pages/ManageRecipes';
 import MealHistory from './pages/MealHistory';
+import LoginPage from './pages/LoginPage';
+import RegisterPage from './pages/RegisterPage';
+import RequireAuth from './components/RequireAuth';
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom';
+import { useAuth } from './contexts/AuthContext';
 import {
   getRecommendation, acceptMeal, skipMeal, getAnotherMeal,
   getRecipes, addMealHistory, getPlannedMeals, deletePlannedMeal
@@ -20,9 +24,10 @@ function toLocalDateStr(d) {
   return `${y}-${m}-${day}`;
 }
 
-function App() {
+function MainApp() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { logout, user } = useAuth();
   const currentView = location.pathname === '/history' ? 'history' : location.pathname === '/recipes' ? 'manage' : 'recommendation';
   const [recommendation, setRecommendation] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -36,7 +41,6 @@ function App() {
   const [plannedMeals, setPlannedMeals] = useState([]);
   const [showChooseModal, setShowChooseModal] = useState(false);
   const [planTargetDate, setPlanTargetDate] = useState(null);
-  // Sticky target: null = auto-detect first empty day, string = locked date
   const [acceptTargetDate, setAcceptTargetDate] = useState(null);
 
   useEffect(() => {
@@ -45,7 +49,6 @@ function App() {
     fetchPlannedMeals();
   }, []);
 
-  // Helper: find the first day without a planned meal
   const findFirstEmptyDay = useCallback((meals) => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -59,11 +62,9 @@ function App() {
         return { date: key, offset: i, dayObj: d };
       }
     }
-    // All 7 days full → default to today
     return { date: toLocalDateStr(today), offset: 0, dayObj: today };
   }, []);
 
-  // Build the accept button label from the effective target date
   const { nextDate, acceptLabel, hasExistingMeal, headerLabel } = useMemo(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -71,12 +72,10 @@ function App() {
 
     let targetDate;
     if (acceptTargetDate) {
-      // Sticky target — use the locked date
       const d = new Date(acceptTargetDate + 'T00:00:00');
       const offset = Math.round((d - today) / 86400000);
       targetDate = { date: acceptTargetDate, offset, dayObj: d };
     } else {
-      // Auto-detect first empty day
       targetDate = findFirstEmptyDay(plannedMeals);
     }
 
@@ -99,7 +98,6 @@ function App() {
     return { nextDate: targetDate.date, acceptLabel: label, hasExistingMeal: alreadyPlanned, headerLabel: header };
   }, [plannedMeals, acceptTargetDate, findFirstEmptyDay]);
 
-  // Advance to the next empty day (clear sticky target)
   const advanceToNextDay = useCallback(() => {
     setAcceptTargetDate(null);
   }, []);
@@ -141,13 +139,11 @@ function App() {
     if (!recommendation) return;
     setLoading(true);
     try {
-      // If the target day already has a planned meal, replace it
       const existingMeal = plannedMeals.find((m) => m.date === nextDate);
       if (existingMeal) {
         await deletePlannedMeal(existingMeal.id);
       }
 
-      // Plan the meal on the target date
       await addMealHistory({
         recipe_id: recommendation.recipe.id,
         date: nextDate,
@@ -155,11 +151,8 @@ function App() {
         cooked: false,
       });
 
-      // Clear the target date to automatically advance to the next empty day
       setAcceptTargetDate(null);
       await fetchPlannedMeals();
-
-      // Get a fresh recommendation for browsing alternatives
       await fetchRecommendation();
 
       setToast('Meal added to plan!');
@@ -212,26 +205,19 @@ function App() {
     }
   };
 
-  // Meal planning handlers
   const handlePickMealClick = () => {
     setPlanTargetDate(nextDate);
     setShowChooseModal(true);
   };
 
   const handleDayClick = async (dateStr) => {
-    // If the day already has a meal, just set it as active target to browse alternatives
     const existingMeal = plannedMeals.find(m => m.date === dateStr);
-
     setAcceptTargetDate(dateStr);
 
     if (!existingMeal) {
-      // Empty day, optionally open the modal to pick a specific recipe,
-      // or they can just use the "Cook this" button for the default recommendation.
       setPlanTargetDate(dateStr);
-      // Wait to fetch recommendation until after state updates
       await fetchRecommendation();
     } else {
-      // Existing meal day, just get a fresh recommendation to swap
       await fetchRecommendation();
     }
   };
@@ -261,6 +247,11 @@ function App() {
     }
   };
 
+  const handleLogout = async () => {
+    await logout();
+    navigate('/login', { replace: true });
+  };
+
   const isWide = currentView === 'manage' || currentView === 'history';
 
   return (
@@ -274,7 +265,7 @@ function App() {
             className={currentView === 'recommendation' ? 'nav-active' : ''}
             onClick={() => navigate('/')}
           >
-            Tonight's Meal
+            Weekly Menu
           </button>
           <button
             className={currentView === 'history' ? 'nav-active' : ''}
@@ -287,6 +278,9 @@ function App() {
             onClick={() => navigate('/recipes')}
           >
             Recipes
+          </button>
+          <button className="btn-logout" onClick={handleLogout} title={user?.email}>
+            Sign out
           </button>
         </nav>
       </header>
@@ -368,6 +362,18 @@ function App() {
         <p>Your personal cooking companion</p>
       </footer>
     </div>
+  );
+}
+
+function App() {
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/register" element={<RegisterPage />} />
+      <Route element={<RequireAuth />}>
+        <Route path="/*" element={<MainApp />} />
+      </Route>
+    </Routes>
   );
 }
 
